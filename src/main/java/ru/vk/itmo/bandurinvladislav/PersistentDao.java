@@ -10,7 +10,6 @@ import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,8 +38,8 @@ public class PersistentDao implements Dao<MemorySegment, Entry<MemorySegment>> {
     private final Arena daoArena = Arena.ofConfined();
     private final ConcurrentNavigableMap<MemorySegment, Entry<MemorySegment>> inMemoryStorage =
             new ConcurrentSkipListMap<>(MEMORY_SEGMENT_COMPARATOR);
-    private final MemorySegment fileSegment;
     private final Path persistentStorage;
+    private final MemorySegment fileSegment;
 
     public PersistentDao(Config config) {
         persistentStorage = config.basePath().resolve(STORAGE_NAME);
@@ -71,22 +70,26 @@ public class PersistentDao implements Dao<MemorySegment, Entry<MemorySegment>> {
         if (!Files.exists(persistentStorage)) {
             return null;
         }
+
         long offset = 0;
-        long entryCount = fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED
-                .withOrder(ByteOrder.BIG_ENDIAN), offset);
+        long entryCount = fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, offset);
         offset += Long.BYTES;
 
         for (long i = 0; i < entryCount; i++) {
-            long keySize = fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED
-                    .withOrder(ByteOrder.BIG_ENDIAN), offset);
+            long keySize = fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, offset);
+            if (keySize != key.byteSize()) {
+                offset += Long.BYTES + keySize;
+                offset += Long.BYTES + fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, offset);
+                continue;
+            }
+
             offset += Long.BYTES;
             MemorySegment entryKey = fileSegment.asSlice(offset, keySize);
             offset += keySize;
 
-            long valueSize = fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED
-                    .withOrder(ByteOrder.BIG_ENDIAN), offset);
+            long valueSize = fileSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, offset);
             offset += Long.BYTES;
-            if (MEMORY_SEGMENT_COMPARATOR.compare(key, entryKey) == 0) {
+            if (key.mismatch(entryKey) == -1) {
                 MemorySegment entryValue = fileSegment.asSlice(offset, valueSize);
                 return new BaseEntry<>(entryKey, entryValue);
             } else {
@@ -114,7 +117,7 @@ public class PersistentDao implements Dao<MemorySegment, Entry<MemorySegment>> {
     }
 
     private void writeMemorySegment(MemorySegment fileSegment, MemorySegment data, long offset) {
-        fileSegment.set(ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), offset, data.byteSize());
+        fileSegment.set(ValueLayout.JAVA_LONG_UNALIGNED, offset, data.byteSize());
         MemorySegment.copy(data, 0, fileSegment, offset + Long.BYTES, data.byteSize());
     }
 
@@ -133,21 +136,20 @@ public class PersistentDao implements Dao<MemorySegment, Entry<MemorySegment>> {
                 fileSegmentSize += e.getKey().byteSize() + e.getValue().value().byteSize() + 2 * Long.BYTES;
             }
 
-            MemorySegment fileSegment = fileChannel.map(
+            MemorySegment fileWriteSegment = fileChannel.map(
                     FileChannel.MapMode.READ_WRITE,
                     0,
                     fileSegmentSize,
                     arena
             );
 
-            fileSegment.set(ValueLayout.JAVA_LONG_UNALIGNED
-                    .withOrder(ByteOrder.BIG_ENDIAN), writeOffset, inMemoryStorage.size());
+            fileWriteSegment.set(ValueLayout.JAVA_LONG_UNALIGNED, writeOffset, inMemoryStorage.size());
             writeOffset += 8;
 
             for (Map.Entry<MemorySegment, Entry<MemorySegment>> e : inMemoryStorage.entrySet()) {
-                writeMemorySegment(fileSegment, e.getKey(), writeOffset);
+                writeMemorySegment(fileWriteSegment, e.getKey(), writeOffset);
                 writeOffset += Long.BYTES + e.getKey().byteSize();
-                writeMemorySegment(fileSegment, e.getValue().value(), writeOffset);
+                writeMemorySegment(fileWriteSegment, e.getValue().value(), writeOffset);
                 writeOffset += Long.BYTES + e.getValue().value().byteSize();
             }
         }
