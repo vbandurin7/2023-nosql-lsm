@@ -27,7 +27,7 @@ public class BloomFilter {
 
     public BloomFilter(BitSet filter, int n) {
         this.filter = filter;
-        bitsSize = filter.getLongs().size() * 64;
+        bitsSize = filter.size() * 64;
         hashCount = BloomUtil.evalHashCount(bitsSize, n);
     }
 
